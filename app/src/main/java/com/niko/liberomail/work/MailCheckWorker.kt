@@ -9,6 +9,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.niko.liberomail.data.CredentialStore
+import com.niko.liberomail.data.RulesStore
 import com.niko.liberomail.mail.MailClient
 import com.niko.liberomail.util.NotificationHelper
 import java.util.concurrent.TimeUnit
@@ -35,7 +36,8 @@ class MailCheckWorker(
             )
 
             val lastUid = store.lastNotifiedUid
-            val newer = client.fetchNewerThan(lastUid, limit = 30)
+            val rules = RulesStore(applicationContext).getRules()
+            val newer = client.fetchNewerThan(lastUid, limit = 30, rules = rules)
 
             if (newer.isNotEmpty()) {
                 // Alla prima esecuzione (lastUid == 0) impostiamo solo la baseline,

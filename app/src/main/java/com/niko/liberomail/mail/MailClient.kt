@@ -1,6 +1,9 @@
 package com.niko.liberomail.mail
 
+import android.util.Base64
 import com.niko.liberomail.data.EmailMessage
+import com.niko.liberomail.data.Mailbox
+import com.niko.liberomail.data.MailRule
 import java.util.Properties
 import javax.mail.Flags
 import javax.mail.Folder
@@ -32,7 +35,6 @@ class MailClient(
             put("mail.imaps.connectiontimeout", "15000")
             put("mail.imaps.timeout", "20000")
             put("mail.imaps.writetimeout", "20000")
-            // Compatibilità protocolli TLS moderni
             put("mail.imaps.ssl.protocols", "TLSv1.2 TLSv1.3")
         }
         return Session.getInstance(props)
@@ -44,162 +46,225 @@ class MailClient(
         return store
     }
 
-    /** Verifica login: lancia un'eccezione se le credenziali/parametri sono errati. */
     fun testConnection() {
-        val store = openStore()
-        store.close()
+        openStore().close()
     }
 
-    /** Restituisce le ultime [limit] email della Posta in arrivo (più recenti per prime). */
-    fun fetchInbox(limit: Int = 50): List<EmailMessage> {
+    /**
+     * Ultimi [limit] messaggi della casella. Se [rules] non è vuota e la casella è
+     * la Posta in arrivo, i messaggi che corrispondono a una regola vengono spostati
+     * nel Cestino e non compaiono nella lista restituita.
+     */
+    fun fetchMessages(
+        mailbox: Mailbox,
+        limit: Int = 60,
+        rules: List<MailRule> = emptyList()
+    ): List<EmailMessage> {
         val store = openStore()
         try {
-            val inbox = store.getFolder("INBOX")
-            inbox.open(Folder.READ_ONLY)
+            val applyRules = mailbox == Mailbox.INBOX && rules.isNotEmpty()
+            val mode = if (applyRules) Folder.READ_WRITE else Folder.READ_ONLY
+            val folder = openMailbox(store, mailbox, mode) ?: return emptyList()
             try {
-                val total = inbox.messageCount
+                val total = folder.messageCount
                 if (total == 0) return emptyList()
 
                 val start = (total - limit + 1).coerceAtLeast(1)
-                val messages = inbox.getMessages(start, total)
+                val messages = folder.getMessages(start, total)
 
                 val fp = javax.mail.FetchProfile().apply {
                     add(javax.mail.FetchProfile.Item.ENVELOPE)
                     add(javax.mail.FetchProfile.Item.FLAGS)
                     add(javax.mail.UIDFolder.FetchProfileItem.UID)
                 }
-                inbox.fetch(messages, fp)
+                folder.fetch(messages, fp)
 
-                val uidFolder = inbox as javax.mail.UIDFolder
+                val uidFolder = folder as javax.mail.UIDFolder
+                val outgoing = mailbox == Mailbox.SENT
                 val result = ArrayList<EmailMessage>(messages.size)
+                val toTrash = ArrayList<Message>()
+
                 for (msg in messages) {
+                    val display = if (outgoing) formatRecipient(msg) else formatFrom(msg)
+                    val subject = decode(msg.subject) ?: "(senza oggetto)"
+
+                    if (applyRules) {
+                        val address = fromRawAddress(msg)
+                        val hit = rules.any { it.matches(display, address, subject) }
+                        if (hit) {
+                            toTrash.add(msg)
+                            continue
+                        }
+                    }
+
                     result.add(
                         EmailMessage(
                             uid = uidFolder.getUID(msg),
-                            from = formatFrom(msg),
-                            subject = decode(msg.subject) ?: "(senza oggetto)",
+                            contact = display,
+                            subject = subject,
                             dateMillis = (msg.receivedDate ?: msg.sentDate)?.time ?: 0L,
-                            seen = msg.isSet(Flags.Flag.SEEN)
+                            seen = msg.isSet(Flags.Flag.SEEN),
+                            outgoing = outgoing
                         )
                     )
                 }
-                // Più recenti per primi
+
+                if (toTrash.isNotEmpty()) {
+                    moveToTrash(store, folder, toTrash.toTypedArray())
+                }
+
                 return result.sortedByDescending { it.dateMillis }
             } finally {
-                inbox.close(false)
+                folder.close(applyRules) // expunge se abbiamo cancellato
             }
         } finally {
             store.close()
         }
     }
 
-    /** Scarica il corpo completo di un messaggio dato il suo UID e lo marca come letto. */
-    fun fetchBody(uid: Long): EmailMessage? {
+    /** Scarica il corpo completo (con immagini) e marca come letto. */
+    fun fetchBody(mailbox: Mailbox, uid: Long): EmailMessage? {
         val store = openStore()
         try {
-            val inbox = store.getFolder("INBOX")
-            inbox.open(Folder.READ_WRITE)
+            val folder = openMailbox(store, mailbox, Folder.READ_WRITE) ?: return null
             try {
-                val uidFolder = inbox as javax.mail.UIDFolder
+                val uidFolder = folder as javax.mail.UIDFolder
                 val msg = uidFolder.getMessageByUID(uid) ?: return null
 
-                val (text, isHtml) = extractBody(msg)
-                msg.setFlag(Flags.Flag.SEEN, true)
+                val (html, isHtml) = extractRenderableBody(msg)
+                if (mailbox == Mailbox.INBOX) msg.setFlag(Flags.Flag.SEEN, true)
 
+                val outgoing = mailbox == Mailbox.SENT
                 return EmailMessage(
                     uid = uid,
-                    from = formatFrom(msg),
+                    contact = if (outgoing) formatRecipient(msg) else formatFrom(msg),
                     subject = decode(msg.subject) ?: "(senza oggetto)",
                     dateMillis = (msg.receivedDate ?: msg.sentDate)?.time ?: 0L,
                     seen = true,
-                    body = text,
+                    outgoing = outgoing,
+                    body = html,
                     isHtml = isHtml
                 )
             } finally {
-                inbox.close(false)
+                folder.close(false)
             }
         } finally {
             store.close()
         }
     }
 
-    /**
-     * Cancella un messaggio: prova a spostarlo nel Cestino, poi lo rimuove dall'INBOX.
-     * Se il Cestino non è disponibile, esegue una cancellazione definitiva.
-     */
-    fun deleteMessage(uid: Long): Boolean {
+    /** Elimina uno o più messaggi: li sposta nel Cestino e li rimuove dalla casella. */
+    fun deleteMessages(mailbox: Mailbox, uids: List<Long>): Boolean {
+        if (uids.isEmpty()) return true
         val store = openStore()
         try {
-            val inbox = store.getFolder("INBOX")
-            inbox.open(Folder.READ_WRITE)
+            val folder = openMailbox(store, mailbox, Folder.READ_WRITE) ?: return false
             try {
-                val uidFolder = inbox as javax.mail.UIDFolder
-                val msg = uidFolder.getMessageByUID(uid) ?: return false
-
-                // Tentativo: copia nel Cestino prima di rimuovere
-                val trash = findTrashFolder(store)
-                if (trash != null) {
-                    try {
-                        inbox.copyMessages(arrayOf(msg), trash)
-                    } catch (_: Exception) {
-                        // se la copia fallisce, procediamo comunque con la rimozione
-                    }
-                }
-
-                msg.setFlag(Flags.Flag.DELETED, true)
-                inbox.expunge()
+                val uidFolder = folder as javax.mail.UIDFolder
+                val toDelete = uids.mapNotNull { uidFolder.getMessageByUID(it) }.toTypedArray()
+                if (toDelete.isEmpty()) return false
+                moveToTrash(store, folder, toDelete)
+                folder.expunge()
                 return true
             } finally {
-                inbox.close(true)
+                folder.close(true)
             }
         } finally {
             store.close()
         }
     }
 
-    /** Per il worker: restituisce i messaggi con UID maggiore di [sinceUid]. */
-    fun fetchNewerThan(sinceUid: Long, limit: Int = 30): List<EmailMessage> {
-        val all = fetchInbox(limit)
-        return all.filter { it.uid > sinceUid }
+    /** Per il worker: messaggi in arrivo con UID > [sinceUid] (regole già applicate). */
+    fun fetchNewerThan(
+        sinceUid: Long,
+        limit: Int = 30,
+        rules: List<MailRule> = emptyList()
+    ): List<EmailMessage> =
+        fetchMessages(Mailbox.INBOX, limit, rules).filter { it.uid > sinceUid }
+
+    // ---------- Helper cartelle ----------
+
+    private fun openMailbox(store: Store, mailbox: Mailbox, mode: Int): Folder? {
+        val folder = findFolder(store, mailbox.candidates) ?: return null
+        folder.open(mode)
+        return folder
     }
 
-    // ---------- Helper privati ----------
-
-    private fun findTrashFolder(store: Store): Folder? {
-        val candidates = listOf("Cestino", "Trash", "INBOX.Trash", "Deleted", "Posta eliminata")
+    private fun findFolder(store: Store, candidates: List<String>): Folder? {
         for (name in candidates) {
             try {
                 val f = store.getFolder(name)
                 if (f.exists()) return f
             } catch (_: Exception) {
-                // ignora e prova il successivo
             }
         }
         return null
     }
 
+    private fun moveToTrash(store: Store, source: Folder, msgs: Array<Message>) {
+        if (msgs.isEmpty()) return
+        val trash = findFolder(store, TRASH_CANDIDATES)
+        if (trash != null) {
+            try {
+                source.copyMessages(msgs, trash)
+            } catch (_: Exception) {
+            }
+        }
+        for (m in msgs) m.setFlag(Flags.Flag.DELETED, true)
+    }
+
+    // ---------- Helper mittente/destinatario ----------
+
     private fun formatFrom(msg: Message): String {
         val froms = msg.from ?: return "(mittente sconosciuto)"
-        if (froms.isEmpty()) return "(mittente sconosciuto)"
-        val a = froms[0]
-        return if (a is InternetAddress) {
-            a.personal?.let { decode(it) } ?: a.address ?: "(mittente sconosciuto)"
+        return addressLabel(froms.firstOrNull()) ?: "(mittente sconosciuto)"
+    }
+
+    private fun formatRecipient(msg: Message): String {
+        val to = try { msg.getRecipients(Message.RecipientType.TO) } catch (_: Exception) { null }
+        return addressLabel(to?.firstOrNull()) ?: "(destinatario sconosciuto)"
+    }
+
+    private fun fromRawAddress(msg: Message): String {
+        val a = (msg.from ?: return "").firstOrNull() ?: return ""
+        return if (a is InternetAddress) a.address ?: "" else a.toString()
+    }
+
+    private fun addressLabel(addr: javax.mail.Address?): String? {
+        if (addr == null) return null
+        return if (addr is InternetAddress) {
+            addr.personal?.let { decode(it) } ?: addr.address
         } else {
-            decode(a.toString()) ?: "(mittente sconosciuto)"
+            decode(addr.toString())
         }
     }
 
     private fun decode(value: String?): String? {
         if (value == null) return null
-        return try {
-            MimeUtility.decodeText(value)
-        } catch (_: Exception) {
-            value
-        }
+        return try { MimeUtility.decodeText(value) } catch (_: Exception) { value }
     }
 
-    /** Estrae il testo del messaggio. Ritorna (contenuto, isHtml). */
-    private fun extractBody(part: Part): Pair<String, Boolean> {
+    // ---------- Estrazione corpo + immagini ----------
+
+    private fun extractRenderableBody(part: Part): Pair<String, Boolean> {
+        val cidImages = HashMap<String, String>()
+        collectInlineImages(part, cidImages)
+
+        val (text, isHtml) = findBody(part)
+        if (text.isBlank()) return "(messaggio senza testo)" to false
+
+        var html = if (isHtml) text
+        else "<pre style=\"white-space:pre-wrap;word-wrap:break-word\">${escapeHtml(text)}</pre>"
+
+        if (cidImages.isNotEmpty()) {
+            for ((cid, dataUri) in cidImages) {
+                html = html.replace("cid:$cid", dataUri, ignoreCase = true)
+            }
+        }
+        return html to true
+    }
+
+    private fun findBody(part: Part): Pair<String, Boolean> {
         try {
             if (part.isMimeType("text/plain")) {
                 return (part.content?.toString() ?: "") to false
@@ -210,25 +275,55 @@ class MailClient(
             if (part.isMimeType("multipart/*")) {
                 val mp = part.content as? Multipart ?: return "" to false
                 var htmlFallback: String? = null
+                var plainFallback: String? = null
                 for (i in 0 until mp.count) {
                     val bp = mp.getBodyPart(i)
-                    val disposition = bp.disposition
-                    if (disposition != null &&
-                        disposition.equals(Part.ATTACHMENT, ignoreCase = true)
-                    ) {
-                        continue
-                    }
-                    val (text, isHtml) = extractBody(bp)
-                    if (text.isNotBlank()) {
-                        if (!isHtml) return text to false // text/plain ha priorità
-                        if (htmlFallback == null) htmlFallback = text
-                    }
+                    val disp = bp.disposition
+                    if (disp != null && disp.equals(Part.ATTACHMENT, true)) continue
+                    val (t, isHtml) = findBody(bp)
+                    if (t.isBlank()) continue
+                    if (isHtml && htmlFallback == null) htmlFallback = t
+                    if (!isHtml && plainFallback == null) plainFallback = t
                 }
                 if (htmlFallback != null) return htmlFallback to true
+                if (plainFallback != null) return plainFallback to false
             }
         } catch (_: Exception) {
-            // contenuto non leggibile
         }
         return "" to false
+    }
+
+    private fun collectInlineImages(part: Part, out: HashMap<String, String>) {
+        try {
+            if (part.isMimeType("multipart/*")) {
+                val mp = part.content as? Multipart ?: return
+                for (i in 0 until mp.count) collectInlineImages(mp.getBodyPart(i), out)
+                return
+            }
+            val contentType = part.contentType?.lowercase() ?: ""
+            if (contentType.startsWith("image/")) {
+                val cidHeader = part.getHeader("Content-ID")?.firstOrNull()
+                    ?: part.getHeader("Content-Id")?.firstOrNull()
+                if (cidHeader != null) {
+                    val cid = cidHeader.trim().removePrefix("<").removeSuffix(">")
+                    val mime = contentType.substringBefore(';').trim()
+                    val bytes = part.inputStream.use { it.readBytes() }
+                    val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                    out[cid] = "data:$mime;base64,$b64"
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun escapeHtml(s: String): String = s
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+
+    companion object {
+        private val TRASH_CANDIDATES = listOf(
+            "Cestino", "Trash", "INBOX.Trash", "Deleted", "Posta eliminata", "Deleted Messages"
+        )
     }
 }

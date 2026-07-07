@@ -32,5 +32,10 @@
             android:exported="false"
             android:parentActivityName=".InboxActivity" />
 
+        <activity
+            android:name=".RulesActivity"
+            android:exported="false"
+            android:parentActivityName=".InboxActivity" />
+
     </application>
 </manifest>

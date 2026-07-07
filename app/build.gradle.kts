@@ -11,8 +11,8 @@ android {
         applicationId = "com.niko.liberomail"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 4
+        versionName = "4.0"
     }
 
     buildTypes {
@@ -34,18 +34,20 @@ android {
     }
     buildFeatures {
         viewBinding = true
-packaging {
+    }
+    packaging {
         resources {
             excludes += setOf(
                 "META-INF/NOTICE.md",
                 "META-INF/LICENSE.md",
                 "META-INF/NOTICE.txt",
                 "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/LICENSE",
                 "META-INF/DEPENDENCIES",
                 "META-INF/*.kotlin_module"
             )
         }
-    }
     }
 }
 
@@ -58,12 +60,12 @@ dependencies {
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
 
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    implementation("androidx.activity:activity-ktx:1.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
-    // Porta Android di JavaMail (Jakarta Mail) per IMAP/SMTP
     implementation("com.sun.mail:android-mail:1.6.7")
     implementation("com.sun.mail:android-activation:1.6.7")
 }

@@ -46,7 +46,7 @@ object NotificationHelper {
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mail)
-            .setContentTitle(message.from)
+            .setContentTitle(message.contact)
             .setContentText(message.subject)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message.subject))
             .setAutoCancel(true)

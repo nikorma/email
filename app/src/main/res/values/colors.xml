@@ -6,4 +6,6 @@
     <color name="text_primary">#FF1A1C1E</color>
     <color name="text_secondary">#FF5A5F66</color>
     <color name="unread_dot">#0B57D0</color>
+    <color name="row_selected">#FFD7E7FF</color>
+    <color name="row_normal">#FFFFFFFF</color>
 </resources>

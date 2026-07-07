@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_inbox"
+        android:icon="@drawable/ic_inbox"
+        android:title="In arrivo" />
+    <item
+        android:id="@+id/nav_sent"
+        android:icon="@drawable/ic_sent"
+        android:title="Inviata" />
+</menu>
