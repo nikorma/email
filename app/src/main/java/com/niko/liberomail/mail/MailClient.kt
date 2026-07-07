@@ -2,8 +2,9 @@ package com.niko.liberomail.mail
 
 import android.util.Base64
 import com.niko.liberomail.data.EmailMessage
-import com.niko.liberomail.data.Mailbox
+import com.niko.liberomail.data.MailFolder
 import com.niko.liberomail.data.MailRule
+import java.util.Date
 import java.util.Properties
 import javax.mail.Flags
 import javax.mail.Folder
@@ -13,17 +14,19 @@ import javax.mail.Part
 import javax.mail.Session
 import javax.mail.Store
 import javax.mail.internet.InternetAddress
+import javax.mail.internet.MimeMessage
 import javax.mail.internet.MimeUtility
 
 /**
- * Gestisce la connessione IMAP verso Libero (imapmail.libero.it:993, SSL).
- * Tutti i metodi sono bloccanti: vanno chiamati da un dispatcher IO.
+ * Connessione IMAP/SMTP verso Libero. Metodi bloccanti: chiamare da un dispatcher IO.
  */
 class MailClient(
     private val host: String,
     private val port: Int,
     private val user: String,
-    private val password: String
+    private val password: String,
+    private val smtpHost: String = "smtp.libero.it",
+    private val smtpPort: Int = 465
 ) {
 
     private fun session(): Session {
@@ -50,21 +53,68 @@ class MailClient(
         openStore().close()
     }
 
+    /** Elenco delle cartelle del server (Posta in arrivo per prima). */
+    fun listFolders(): List<MailFolder> {
+        val store = openStore()
+        try {
+            val all = store.defaultFolder.list("*")
+            val result = ArrayList<MailFolder>()
+            var hasInbox = false
+            for (f in all) {
+                try {
+                    if ((f.type and Folder.HOLDS_MESSAGES) == 0) continue
+                    val full = f.fullName
+                    val lower = full.lowercase()
+                    val isInbox = full.equals("INBOX", true)
+                    if (isInbox) hasInbox = true
+                    val isSent = lower.contains("sent") || lower.contains("inviat")
+                    result.add(MailFolder(full, displayNameFor(full, f.name), isSent, isInbox))
+                } catch (_: Exception) {
+                    // cartella non selezionabile: ignora
+                }
+            }
+            if (!hasInbox) result.add(MailFolder.INBOX)
+            return result.sortedWith(
+                compareByDescending<MailFolder> { it.isInbox }
+                    .thenByDescending { it.isSent }
+                    .thenBy { it.displayName.lowercase() }
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    private fun displayNameFor(full: String, name: String): String {
+        val l = full.lowercase()
+        return when {
+            l == "inbox" -> "Posta in arrivo"
+            l.contains("sent") || l.contains("inviat") -> "Posta inviata"
+            l.contains("draft") || l.contains("bozze") -> "Bozze"
+            l.contains("trash") || l.contains("cestino") || l.contains("deleted") ||
+                l.contains("eliminat") -> "Cestino"
+            l.contains("junk") || l.contains("spam") || l.contains("indesiderat") -> "Posta indesiderata"
+            else -> name
+        }
+    }
+
     /**
-     * Ultimi [limit] messaggi della casella. Se [rules] non è vuota e la casella è
-     * la Posta in arrivo, i messaggi che corrispondono a una regola vengono spostati
-     * nel Cestino e non compaiono nella lista restituita.
+     * Ultimi [limit] messaggi della cartella [folderName]. Se [rules] non è vuota e la
+     * cartella è INBOX, i messaggi che corrispondono a una regola vengono spostati nel
+     * Cestino e non compaiono nella lista.
      */
     fun fetchMessages(
-        mailbox: Mailbox,
+        folderName: String,
+        isSent: Boolean,
         limit: Int = 60,
         rules: List<MailRule> = emptyList()
     ): List<EmailMessage> {
         val store = openStore()
         try {
-            val applyRules = mailbox == Mailbox.INBOX && rules.isNotEmpty()
+            val applyRules = folderName.equals("INBOX", true) && rules.isNotEmpty()
             val mode = if (applyRules) Folder.READ_WRITE else Folder.READ_ONLY
-            val folder = openMailbox(store, mailbox, mode) ?: return emptyList()
+            val folder = store.getFolder(folderName)
+            if (!folder.exists()) return emptyList()
+            folder.open(mode)
             try {
                 val total = folder.messageCount
                 if (total == 0) return emptyList()
@@ -80,18 +130,16 @@ class MailClient(
                 folder.fetch(messages, fp)
 
                 val uidFolder = folder as javax.mail.UIDFolder
-                val outgoing = mailbox == Mailbox.SENT
                 val result = ArrayList<EmailMessage>(messages.size)
                 val toTrash = ArrayList<Message>()
 
                 for (msg in messages) {
-                    val display = if (outgoing) formatRecipient(msg) else formatFrom(msg)
+                    val display = if (isSent) formatRecipient(msg) else formatFrom(msg)
                     val subject = decode(msg.subject) ?: "(senza oggetto)"
 
                     if (applyRules) {
                         val address = fromRawAddress(msg)
-                        val hit = rules.any { it.matches(display, address, subject) }
-                        if (hit) {
+                        if (rules.any { it.matches(display, address, subject) }) {
                             toTrash.add(msg)
                             continue
                         }
@@ -104,44 +152,42 @@ class MailClient(
                             subject = subject,
                             dateMillis = (msg.receivedDate ?: msg.sentDate)?.time ?: 0L,
                             seen = msg.isSet(Flags.Flag.SEEN),
-                            outgoing = outgoing
+                            outgoing = isSent
                         )
                     )
                 }
 
-                if (toTrash.isNotEmpty()) {
-                    moveToTrash(store, folder, toTrash.toTypedArray())
-                }
+                if (toTrash.isNotEmpty()) moveToTrash(store, folder, toTrash.toTypedArray())
 
                 return result.sortedByDescending { it.dateMillis }
             } finally {
-                folder.close(applyRules) // expunge se abbiamo cancellato
+                folder.close(applyRules)
             }
         } finally {
             store.close()
         }
     }
 
-    /** Scarica il corpo completo (con immagini) e marca come letto. */
-    fun fetchBody(mailbox: Mailbox, uid: Long): EmailMessage? {
+    fun fetchBody(folderName: String, isSent: Boolean, uid: Long): EmailMessage? {
         val store = openStore()
         try {
-            val folder = openMailbox(store, mailbox, Folder.READ_WRITE) ?: return null
+            val folder = store.getFolder(folderName)
+            if (!folder.exists()) return null
+            folder.open(Folder.READ_WRITE)
             try {
                 val uidFolder = folder as javax.mail.UIDFolder
                 val msg = uidFolder.getMessageByUID(uid) ?: return null
 
                 val (html, isHtml) = extractRenderableBody(msg)
-                if (mailbox == Mailbox.INBOX) msg.setFlag(Flags.Flag.SEEN, true)
+                if (!isSent) msg.setFlag(Flags.Flag.SEEN, true)
 
-                val outgoing = mailbox == Mailbox.SENT
                 return EmailMessage(
                     uid = uid,
-                    contact = if (outgoing) formatRecipient(msg) else formatFrom(msg),
+                    contact = if (isSent) formatRecipient(msg) else formatFrom(msg),
                     subject = decode(msg.subject) ?: "(senza oggetto)",
                     dateMillis = (msg.receivedDate ?: msg.sentDate)?.time ?: 0L,
                     seen = true,
-                    outgoing = outgoing,
+                    outgoing = isSent,
                     body = html,
                     isHtml = isHtml
                 )
@@ -153,17 +199,22 @@ class MailClient(
         }
     }
 
-    /** Elimina uno o più messaggi: li sposta nel Cestino e li rimuove dalla casella. */
-    fun deleteMessages(mailbox: Mailbox, uids: List<Long>): Boolean {
+    fun deleteMessages(folderName: String, uids: List<Long>): Boolean {
         if (uids.isEmpty()) return true
         val store = openStore()
         try {
-            val folder = openMailbox(store, mailbox, Folder.READ_WRITE) ?: return false
+            val folder = store.getFolder(folderName)
+            if (!folder.exists()) return false
+            folder.open(Folder.READ_WRITE)
             try {
                 val uidFolder = folder as javax.mail.UIDFolder
                 val toDelete = uids.mapNotNull { uidFolder.getMessageByUID(it) }.toTypedArray()
                 if (toDelete.isEmpty()) return false
-                moveToTrash(store, folder, toDelete)
+
+                val isTrash = TRASH_CANDIDATES.any { folderName.equals(it, true) }
+                if (!isTrash) moveToTrash(store, folder, toDelete)
+                else for (m in toDelete) m.setFlag(Flags.Flag.DELETED, true)
+
                 folder.expunge()
                 return true
             } finally {
@@ -174,20 +225,55 @@ class MailClient(
         }
     }
 
-    /** Per il worker: messaggi in arrivo con UID > [sinceUid] (regole già applicate). */
     fun fetchNewerThan(
         sinceUid: Long,
         limit: Int = 30,
         rules: List<MailRule> = emptyList()
     ): List<EmailMessage> =
-        fetchMessages(Mailbox.INBOX, limit, rules).filter { it.uid > sinceUid }
+        fetchMessages("INBOX", isSent = false, limit = limit, rules = rules)
+            .filter { it.uid > sinceUid }
 
-    // ---------- Helper cartelle ----------
+    /** Invia un'email via SMTP (smtp.libero.it:465, SSL). [to] può contenere più indirizzi separati da virgola. */
+    fun sendEmail(to: String, subject: String, body: String) {
+        val props = Properties().apply {
+            put("mail.transport.protocol", "smtps")
+            put("mail.smtps.host", smtpHost)
+            put("mail.smtps.port", smtpPort.toString())
+            put("mail.smtps.auth", "true")
+            put("mail.smtps.ssl.enable", "true")
+            put("mail.smtps.ssl.protocols", "TLSv1.2 TLSv1.3")
+            put("mail.smtps.connectiontimeout", "15000")
+            put("mail.smtps.timeout", "20000")
+        }
+        val session = Session.getInstance(props)
+        val msg = MimeMessage(session)
+        msg.setFrom(InternetAddress(user))
+        msg.setRecipients(Message.RecipientType.TO, InternetAddress.parse(to, false))
+        msg.subject = MimeUtility.encodeText(subject, "UTF-8", null)
+        msg.setText(body, "UTF-8")
+        msg.sentDate = Date()
 
-    private fun openMailbox(store: Store, mailbox: Mailbox, mode: Int): Folder? {
-        val folder = findFolder(store, mailbox.candidates) ?: return null
-        folder.open(mode)
-        return folder
+        val transport = session.getTransport("smtps")
+        try {
+            transport.connect(smtpHost, smtpPort, user, password)
+            transport.sendMessage(msg, msg.allRecipients)
+        } finally {
+            transport.close()
+        }
+    }
+
+    // ---------- Helper ----------
+
+    private fun moveToTrash(store: Store, source: Folder, msgs: Array<Message>) {
+        if (msgs.isEmpty()) return
+        val trash = findFolder(store, TRASH_CANDIDATES)
+        if (trash != null && trash.fullName != source.fullName) {
+            try {
+                source.copyMessages(msgs, trash)
+            } catch (_: Exception) {
+            }
+        }
+        for (m in msgs) m.setFlag(Flags.Flag.DELETED, true)
     }
 
     private fun findFolder(store: Store, candidates: List<String>): Folder? {
@@ -200,20 +286,6 @@ class MailClient(
         }
         return null
     }
-
-    private fun moveToTrash(store: Store, source: Folder, msgs: Array<Message>) {
-        if (msgs.isEmpty()) return
-        val trash = findFolder(store, TRASH_CANDIDATES)
-        if (trash != null) {
-            try {
-                source.copyMessages(msgs, trash)
-            } catch (_: Exception) {
-            }
-        }
-        for (m in msgs) m.setFlag(Flags.Flag.DELETED, true)
-    }
-
-    // ---------- Helper mittente/destinatario ----------
 
     private fun formatFrom(msg: Message): String {
         val froms = msg.from ?: return "(mittente sconosciuto)"
@@ -244,8 +316,6 @@ class MailClient(
         return try { MimeUtility.decodeText(value) } catch (_: Exception) { value }
     }
 
-    // ---------- Estrazione corpo + immagini ----------
-
     private fun extractRenderableBody(part: Part): Pair<String, Boolean> {
         val cidImages = HashMap<String, String>()
         collectInlineImages(part, cidImages)
@@ -266,12 +336,8 @@ class MailClient(
 
     private fun findBody(part: Part): Pair<String, Boolean> {
         try {
-            if (part.isMimeType("text/plain")) {
-                return (part.content?.toString() ?: "") to false
-            }
-            if (part.isMimeType("text/html")) {
-                return (part.content?.toString() ?: "") to true
-            }
+            if (part.isMimeType("text/plain")) return (part.content?.toString() ?: "") to false
+            if (part.isMimeType("text/html")) return (part.content?.toString() ?: "") to true
             if (part.isMimeType("multipart/*")) {
                 val mp = part.content as? Multipart ?: return "" to false
                 var htmlFallback: String? = null

@@ -38,6 +38,14 @@ class InboxAdapter(
         onSelectionChanged(0)
     }
 
+    fun selectAllVisible() {
+        selected.clear()
+        items.forEach { selected.add(it.uid) }
+        selectionMode = selected.isNotEmpty()
+        notifyDataSetChanged()
+        onSelectionChanged(selected.size)
+    }
+
     private fun toggle(uid: Long) {
         if (!selected.add(uid)) selected.remove(uid)
         if (selected.isEmpty()) selectionMode = false

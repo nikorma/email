@@ -6,12 +6,10 @@ import android.text.format.DateUtils
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
-import android.webkit.WebView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.niko.liberomail.data.CredentialStore
-import com.niko.liberomail.data.Mailbox
 import com.niko.liberomail.databinding.ActivityMessageBinding
 import com.niko.liberomail.mail.MailClient
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +21,12 @@ class MessageActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMessageBinding
     private lateinit var store: CredentialStore
     private var uid: Long = -1L
-    private var mailbox: Mailbox = Mailbox.INBOX
+    private var folderName: String = "INBOX"
+    private var isSent: Boolean = false
+
+    private fun client() =
+        MailClient(store.imapHost, store.imapPort, store.email, store.password,
+            store.smtpHost, store.smtpPort)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,9 +38,8 @@ class MessageActivity : AppCompatActivity() {
 
         store = CredentialStore(this)
         uid = intent.getLongExtra(EXTRA_UID, -1L)
-        mailbox = runCatching {
-            Mailbox.valueOf(intent.getStringExtra(EXTRA_MAILBOX) ?: Mailbox.INBOX.name)
-        }.getOrDefault(Mailbox.INBOX)
+        folderName = intent.getStringExtra(EXTRA_FOLDER) ?: "INBOX"
+        isSent = intent.getBooleanExtra(EXTRA_IS_SENT, false)
         if (uid < 0) { finish(); return }
 
         setupWebView()
@@ -62,10 +64,7 @@ class MessageActivity : AppCompatActivity() {
         binding.progress.visibility = View.VISIBLE
         lifecycleScope.launch {
             val result = runCatching {
-                withContext(Dispatchers.IO) {
-                    MailClient(store.imapHost, store.imapPort, store.email, store.password)
-                        .fetchBody(mailbox, uid)
-                }
+                withContext(Dispatchers.IO) { client().fetchBody(folderName, isSent, uid) }
             }
             binding.progress.visibility = View.GONE
 
@@ -75,8 +74,7 @@ class MessageActivity : AppCompatActivity() {
                     return@onSuccess
                 }
                 binding.tvSubject.text = msg.subject
-                val label = if (msg.outgoing) "A: ${msg.contact}" else msg.contact
-                binding.tvContact.text = label
+                binding.tvContact.text = if (msg.outgoing) "A: ${msg.contact}" else msg.contact
                 binding.tvDate.text = if (msg.dateMillis > 0) {
                     DateUtils.formatDateTime(
                         this@MessageActivity, msg.dateMillis,
@@ -88,15 +86,13 @@ class MessageActivity : AppCompatActivity() {
                 binding.avatar.backgroundTintList =
                     android.content.res.ColorStateList.valueOf(colorFor(msg.contact))
 
-                val html = wrapHtml(msg.body)
                 binding.webView.loadDataWithBaseURL(
-                    "https://mail.invalid/", html, "text/html", "UTF-8", null
+                    "https://mail.invalid/", wrapHtml(msg.body), "text/html", "UTF-8", null
                 )
             }.onFailure { e ->
                 binding.tvSubject.text = "Errore"
                 binding.webView.loadData(
-                    "Impossibile leggere il messaggio: ${e.message ?: ""}",
-                    "text/plain", "UTF-8"
+                    "Impossibile leggere il messaggio: ${e.message ?: ""}", "text/plain", "UTF-8"
                 )
             }
         }
@@ -159,8 +155,7 @@ class MessageActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    MailClient(store.imapHost, store.imapPort, store.email, store.password)
-                        .deleteMessages(mailbox, listOf(uid))
+                    client().deleteMessages(folderName, listOf(uid))
                 }
             }
             binding.progress.visibility = View.GONE
@@ -184,6 +179,7 @@ class MessageActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_UID = "extra_uid"
-        const val EXTRA_MAILBOX = "extra_mailbox"
+        const val EXTRA_FOLDER = "extra_folder"
+        const val EXTRA_IS_SENT = "extra_is_sent"
     }
 }

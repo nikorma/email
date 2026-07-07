@@ -44,6 +44,14 @@ class CredentialStore(context: Context) {
         get() = prefs.getInt(KEY_IMAP_PORT, DEFAULT_IMAP_PORT)
         set(value) = prefs.edit().putInt(KEY_IMAP_PORT, value).apply()
 
+    var smtpHost: String
+        get() = prefs.getString(KEY_SMTP_HOST, DEFAULT_SMTP_HOST) ?: DEFAULT_SMTP_HOST
+        set(value) = prefs.edit().putString(KEY_SMTP_HOST, value).apply()
+
+    var smtpPort: Int
+        get() = prefs.getInt(KEY_SMTP_PORT, DEFAULT_SMTP_PORT)
+        set(value) = prefs.edit().putInt(KEY_SMTP_PORT, value).apply()
+
     /** UID più alto già notificato, per non rimostrare le stesse email. */
     var lastNotifiedUid: Long
         get() = prefs.getLong(KEY_LAST_UID, 0L)
@@ -59,11 +67,15 @@ class CredentialStore(context: Context) {
     companion object {
         const val DEFAULT_IMAP_HOST = "imapmail.libero.it"
         const val DEFAULT_IMAP_PORT = 993
+        const val DEFAULT_SMTP_HOST = "smtp.libero.it"
+        const val DEFAULT_SMTP_PORT = 465
 
         private const val KEY_EMAIL = "email"
         private const val KEY_PASSWORD = "password"
         private const val KEY_IMAP_HOST = "imap_host"
         private const val KEY_IMAP_PORT = "imap_port"
+        private const val KEY_SMTP_HOST = "smtp_host"
+        private const val KEY_SMTP_PORT = "smtp_port"
         private const val KEY_LAST_UID = "last_uid"
     }
 }

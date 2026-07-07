@@ -2,6 +2,11 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
+        android:id="@+id/action_folders"
+        android:icon="@drawable/ic_folder"
+        android:title="Cartelle"
+        app:showAsAction="ifRoom" />
+    <item
         android:id="@+id/action_sort"
         android:icon="@drawable/ic_sort"
         android:title="Ordina"
@@ -13,12 +18,19 @@
         app:showAsAction="never" />
     <item
         android:id="@+id/action_refresh"
-        android:icon="@drawable/ic_refresh"
         android:title="Aggiorna"
-        app:showAsAction="ifRoom" />
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_load_more"
+        android:title="Carica altri messaggi"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_rules"
         android:title="Regole"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_contacts"
+        android:title="Rubrica"
         app:showAsAction="never" />
     <item
         android:id="@+id/action_logout"

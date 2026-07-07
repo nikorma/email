@@ -17,7 +17,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.niko.liberomail.data.CredentialStore
 import com.niko.liberomail.data.EmailMessage
-import com.niko.liberomail.data.Mailbox
+import com.niko.liberomail.data.MailFolder
 import com.niko.liberomail.data.RulesStore
 import com.niko.liberomail.data.SortOrder
 import com.niko.liberomail.databinding.ActivityInboxBinding
@@ -35,14 +35,20 @@ class InboxActivity : AppCompatActivity() {
     private lateinit var store: CredentialStore
     private lateinit var adapter: InboxAdapter
 
-    private var currentMailbox = Mailbox.INBOX
+    private var currentFolder = MailFolder.INBOX
     private var currentSort = SortOrder.DATE_DESC
     private var onlyUnread = false
+    private var currentLimit = 60
+    private var cachedFolders: List<MailFolder> = emptyList()
     private val fullList = mutableListOf<EmailMessage>()
     private var selectionCount = 0
 
     private val notifPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private fun client() =
+        MailClient(store.imapHost, store.imapPort, store.email, store.password,
+            store.smtpHost, store.smtpPort)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,23 +60,15 @@ class InboxActivity : AppCompatActivity() {
         if (!store.isLoggedIn) { goToLogin(); return }
 
         adapter = InboxAdapter(
-            onOpen = { email -> openMessage(email.uid) },
+            onOpen = { email -> openMessage(email) },
             onSelectionChanged = { count -> onSelectionChanged(count) }
         )
         binding.recycler.layoutManager = LinearLayoutManager(this)
         binding.recycler.adapter = adapter
 
         binding.swipeRefresh.setOnRefreshListener { loadMail(showSpinner = false) }
-
-        binding.bottomNav.setOnItemSelectedListener { item ->
-            val target = if (item.itemId == R.id.nav_sent) Mailbox.SENT else Mailbox.INBOX
-            if (target != currentMailbox) {
-                currentMailbox = target
-                adapter.exitSelection()
-                updateTitle()
-                loadMail(showSpinner = true)
-            }
-            true
+        binding.fabCompose.setOnClickListener {
+            startActivity(Intent(this, ComposeActivity::class.java))
         }
 
         NotificationHelper.ensureChannel(this)
@@ -101,8 +99,10 @@ class InboxActivity : AppCompatActivity() {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     val rules = RulesStore(this@InboxActivity).getRules()
-                    MailClient(store.imapHost, store.imapPort, store.email, store.password)
-                        .fetchMessages(currentMailbox, limit = 60, rules = rules)
+                    client().fetchMessages(
+                        currentFolder.fullName, currentFolder.isSent,
+                        limit = currentLimit, rules = rules
+                    )
                 }
             }
             binding.progress.visibility = View.GONE
@@ -113,7 +113,7 @@ class InboxActivity : AppCompatActivity() {
                 fullList.addAll(list)
                 applySortAndSubmit()
 
-                if (currentMailbox == Mailbox.INBOX && list.isNotEmpty()) {
+                if (currentFolder.isInbox && list.isNotEmpty()) {
                     val maxUid = list.maxOf { it.uid }
                     if (maxUid > store.lastNotifiedUid) store.lastNotifiedUid = maxUid
                 }
@@ -125,11 +125,7 @@ class InboxActivity : AppCompatActivity() {
     }
 
     private fun applySortAndSubmit() {
-        val base = if (onlyUnread && currentMailbox == Mailbox.INBOX) {
-            fullList.filter { !it.seen }
-        } else {
-            fullList
-        }
+        val base = if (onlyUnread && !currentFolder.isSent) fullList.filter { !it.seen } else fullList
         val sorted = when (currentSort) {
             SortOrder.DATE_DESC -> base.sortedByDescending { it.dateMillis }
             SortOrder.DATE_ASC -> base.sortedBy { it.dateMillis }
@@ -139,26 +135,53 @@ class InboxActivity : AppCompatActivity() {
         }
         adapter.submit(sorted)
 
-        binding.tvEmpty.text = when {
-            onlyUnread && currentMailbox == Mailbox.INBOX -> "Nessun messaggio non letto"
-            else -> "Nessun messaggio"
-        }
+        binding.tvEmpty.text =
+            if (onlyUnread && !currentFolder.isSent) "Nessun messaggio non letto" else "Nessun messaggio"
         binding.tvEmpty.visibility = if (sorted.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun showSortDialog() {
         val options = SortOrder.values()
         val labels = options.map { it.label }.toTypedArray()
-        val current = options.indexOf(currentSort)
         AlertDialog.Builder(this)
             .setTitle("Ordina per")
-            .setSingleChoiceItems(labels, current) { dialog, which ->
+            .setSingleChoiceItems(labels, options.indexOf(currentSort)) { dialog, which ->
                 currentSort = options[which]
                 applySortAndSubmit()
                 dialog.dismiss()
             }
             .setNegativeButton("Annulla", null)
             .show()
+    }
+
+    private fun showFolderPicker() {
+        binding.progress.visibility = View.VISIBLE
+        lifecycleScope.launch {
+            val folders = runCatching {
+                withContext(Dispatchers.IO) { client().listFolders() }
+            }.getOrNull()
+            binding.progress.visibility = View.GONE
+
+            if (folders.isNullOrEmpty()) {
+                AlertDialog.Builder(this@InboxActivity)
+                    .setMessage("Impossibile leggere l'elenco delle cartelle.")
+                    .setPositiveButton("OK", null).show()
+                return@launch
+            }
+            cachedFolders = folders
+            val names = folders.map { it.displayName }.toTypedArray()
+            AlertDialog.Builder(this@InboxActivity)
+                .setTitle("Cartelle")
+                .setItems(names) { _, which ->
+                    currentFolder = folders[which]
+                    currentLimit = 60
+                    onlyUnread = false
+                    adapter.exitSelection()
+                    updateTitle()
+                    loadMail(showSpinner = true)
+                }
+                .show()
+        }
     }
 
     private fun onSelectionChanged(count: Int) {
@@ -175,7 +198,7 @@ class InboxActivity : AppCompatActivity() {
     }
 
     private fun updateTitle() {
-        supportActionBar?.title = currentMailbox.displayName
+        supportActionBar?.title = currentFolder.displayName
     }
 
     private fun confirmDeleteSelected() {
@@ -194,8 +217,7 @@ class InboxActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    MailClient(store.imapHost, store.imapPort, store.email, store.password)
-                        .deleteMessages(currentMailbox, uids)
+                    client().deleteMessages(currentFolder.fullName, uids)
                 }
             }
             binding.progress.visibility = View.GONE
@@ -209,10 +231,11 @@ class InboxActivity : AppCompatActivity() {
         }
     }
 
-    private fun openMessage(uid: Long) {
+    private fun openMessage(email: EmailMessage) {
         startActivity(Intent(this, MessageActivity::class.java).apply {
-            putExtra(MessageActivity.EXTRA_UID, uid)
-            putExtra(MessageActivity.EXTRA_MAILBOX, currentMailbox.name)
+            putExtra(MessageActivity.EXTRA_UID, email.uid)
+            putExtra(MessageActivity.EXTRA_FOLDER, currentFolder.fullName)
+            putExtra(MessageActivity.EXTRA_IS_SENT, currentFolder.isSent)
         })
     }
 
@@ -237,6 +260,7 @@ class InboxActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
+            R.id.action_folders -> { showFolderPicker(); true }
             R.id.action_sort -> { showSortDialog(); true }
             R.id.action_filter_unread -> {
                 onlyUnread = !onlyUnread
@@ -245,10 +269,19 @@ class InboxActivity : AppCompatActivity() {
                 true
             }
             R.id.action_refresh -> { loadMail(showSpinner = true); true }
+            R.id.action_load_more -> {
+                currentLimit += 50
+                loadMail(showSpinner = true)
+                true
+            }
             R.id.action_rules -> {
                 startActivity(Intent(this, RulesActivity::class.java)); true
             }
+            R.id.action_contacts -> {
+                startActivity(Intent(this, RubricaActivity::class.java)); true
+            }
             R.id.action_logout -> { logout(); true }
+            R.id.action_select_all -> { adapter.selectAllVisible(); true }
             R.id.action_delete_selected -> { confirmDeleteSelected(); true }
             else -> super.onOptionsItemSelected(item)
         }

@@ -29,7 +29,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:clipToPadding="false"
-                android:paddingBottom="12dp" />
+                android:paddingBottom="88dp" />
         </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
         <TextView
@@ -48,13 +48,16 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center"
             android:visibility="gone" />
-    </FrameLayout>
 
-    <com.google.android.material.bottomnavigation.BottomNavigationView
-        android:id="@+id/bottomNav"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:background="@color/white"
-        app:labelVisibilityMode="labeled"
-        app:menu="@menu/menu_bottom_nav" />
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabCompose"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="20dp"
+            android:contentDescription="Scrivi email"
+            android:src="@drawable/ic_edit"
+            app:backgroundTint="@color/libero_blue"
+            app:tint="@color/white" />
+    </FrameLayout>
 </LinearLayout>

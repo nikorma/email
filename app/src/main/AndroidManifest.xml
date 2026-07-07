@@ -37,5 +37,15 @@
             android:exported="false"
             android:parentActivityName=".InboxActivity" />
 
+        <activity
+            android:name=".ComposeActivity"
+            android:exported="false"
+            android:parentActivityName=".InboxActivity" />
+
+        <activity
+            android:name=".RubricaActivity"
+            android:exported="false"
+            android:parentActivityName=".InboxActivity" />
+
     </application>
 </manifest>
