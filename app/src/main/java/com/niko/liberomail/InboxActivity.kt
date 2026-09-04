@@ -112,6 +112,7 @@ class InboxActivity : AppCompatActivity() {
                 fullList.clear()
                 fullList.addAll(list)
                 applySortAndSubmit()
+                updateTitle()
 
                 if (currentFolder.isInbox && list.isNotEmpty()) {
                     val maxUid = list.maxOf { it.uid }
@@ -188,6 +189,7 @@ class InboxActivity : AppCompatActivity() {
         selectionCount = count
         if (count > 0) {
             supportActionBar?.title = "$count selezionati"
+            supportActionBar?.subtitle = null
             binding.toolbar.setNavigationIcon(R.drawable.ic_close)
             binding.toolbar.setNavigationOnClickListener { adapter.exitSelection() }
         } else {
@@ -199,6 +201,13 @@ class InboxActivity : AppCompatActivity() {
 
     private fun updateTitle() {
         supportActionBar?.title = currentFolder.displayName
+        val unread = fullList.count { !it.seen }
+        supportActionBar?.subtitle = when {
+            currentFolder.isSent -> "${fullList.size} messaggi"
+            unread == 0 -> "Nessuna da leggere · ${fullList.size} messaggi"
+            unread == 1 -> "1 da leggere · ${fullList.size} messaggi"
+            else -> "$unread da leggere · ${fullList.size} messaggi"
+        }
     }
 
     private fun confirmDeleteSelected() {
@@ -272,6 +281,14 @@ class InboxActivity : AppCompatActivity() {
             R.id.action_load_more -> {
                 currentLimit += 50
                 loadMail(showSpinner = true)
+                true
+            }
+            R.id.action_domains -> {
+                startActivity(Intent(this, DomainsActivity::class.java).apply {
+                    putExtra(DomainsActivity.EXTRA_FOLDER, currentFolder.fullName)
+                    putExtra(DomainsActivity.EXTRA_IS_SENT, currentFolder.isSent)
+                    putExtra(DomainsActivity.EXTRA_LIMIT, maxOf(currentLimit, 200))
+                })
                 true
             }
             R.id.action_rules -> {

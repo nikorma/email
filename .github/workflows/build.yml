@@ -5,6 +5,9 @@ on:
   push:
     branches: [ main, master, principale ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,9 +32,22 @@ jobs:
       - name: Compila l'APK di debug
         run: gradle assembleDebug --no-daemon
 
+      - name: Rinomina l'APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/*.apk out/LiberoMail.apk
+
       - name: Carica l'APK come artifact scaricabile
         uses: actions/upload-artifact@v4
         with:
           name: LiberoMail-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: out/LiberoMail.apk
           if-no-files-found: error
+
+      - name: Pubblica l'APK nelle Release (link diretto per il telefono)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ultima-build
+          name: Ultima build LiberoMail
+          body: "APK pronto da installare. Scaricalo dal telefono toccando LiberoMail.apk qui sotto."
+          files: out/LiberoMail.apk

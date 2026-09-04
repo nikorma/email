@@ -47,5 +47,10 @@
             android:exported="false"
             android:parentActivityName=".InboxActivity" />
 
+        <activity
+            android:name=".DomainsActivity"
+            android:exported="false"
+            android:parentActivityName=".InboxActivity" />
+
     </application>
 </manifest>

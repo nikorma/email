@@ -57,23 +57,40 @@ class MailClient(
     fun listFolders(): List<MailFolder> {
         val store = openStore()
         try {
-            val all = store.defaultFolder.list("*")
-            val result = ArrayList<MailFolder>()
-            var hasInbox = false
-            for (f in all) {
+            val found = LinkedHashMap<String, MailFolder>()
+
+            fun consider(f: Folder) {
                 try {
-                    if ((f.type and Folder.HOLDS_MESSAGES) == 0) continue
+                    if (!f.exists()) return
+                    if ((f.type and Folder.HOLDS_MESSAGES) == 0) return
                     val full = f.fullName
+                    if (full.isBlank()) return
+                    if (found.containsKey(full.lowercase())) return
                     val lower = full.lowercase()
                     val isInbox = full.equals("INBOX", true)
-                    if (isInbox) hasInbox = true
-                    val isSent = lower.contains("sent") || lower.contains("inviat")
-                    result.add(MailFolder(full, displayNameFor(full, f.name), isSent, isInbox))
+                    val isSent = SENT_HINTS.any { lower.contains(it) }
+                    found[lower] = MailFolder(full, displayNameFor(full, f.name), isSent, isInbox)
                 } catch (_: Exception) {
-                    // cartella non selezionabile: ignora
                 }
             }
-            if (!hasInbox) result.add(MailFolder.INBOX)
+
+            // 1) elenco ricorsivo dalla cartella radice
+            try { store.defaultFolder.list("*").forEach { consider(it) } } catch (_: Exception) {}
+            // 2) elenco di primo livello (alcuni server non gestiscono "*")
+            try { store.defaultFolder.list().forEach { consider(it) } } catch (_: Exception) {}
+            // 3) namespace personali
+            try { store.personalNamespaces.forEach { ns ->
+                consider(ns)
+                try { ns.list("*").forEach { consider(it) } } catch (_: Exception) {}
+            } } catch (_: Exception) {}
+            // 4) nomi noti provati esplicitamente (rete di sicurezza per Libero)
+            for (name in KNOWN_FOLDERS) {
+                try { consider(store.getFolder(name)) } catch (_: Exception) {}
+            }
+
+            val result = found.values.toMutableList()
+            if (result.none { it.isInbox }) result.add(MailFolder.INBOX)
+
             return result.sortedWith(
                 compareByDescending<MailFolder> { it.isInbox }
                     .thenByDescending { it.isSent }
@@ -88,12 +105,12 @@ class MailClient(
         val l = full.lowercase()
         return when {
             l == "inbox" -> "Posta in arrivo"
-            l.contains("sent") || l.contains("inviat") -> "Posta inviata"
+            SENT_HINTS.any { l.contains(it) } -> "Posta inviata"
             l.contains("draft") || l.contains("bozze") -> "Bozze"
             l.contains("trash") || l.contains("cestino") || l.contains("deleted") ||
                 l.contains("eliminat") -> "Cestino"
             l.contains("junk") || l.contains("spam") || l.contains("indesiderat") -> "Posta indesiderata"
-            else -> name
+            else -> name.ifBlank { full }
         }
     }
 
@@ -149,6 +166,7 @@ class MailClient(
                         EmailMessage(
                             uid = uidFolder.getUID(msg),
                             contact = display,
+                            address = if (isSent) rawRecipient(msg) else fromRawAddress(msg),
                             subject = subject,
                             dateMillis = (msg.receivedDate ?: msg.sentDate)?.time ?: 0L,
                             seen = msg.isSet(Flags.Flag.SEEN),
@@ -184,6 +202,7 @@ class MailClient(
                 return EmailMessage(
                     uid = uid,
                     contact = if (isSent) formatRecipient(msg) else formatFrom(msg),
+                    address = if (isSent) rawRecipient(msg) else fromRawAddress(msg),
                     subject = decode(msg.subject) ?: "(senza oggetto)",
                     dateMillis = (msg.receivedDate ?: msg.sentDate)?.time ?: 0L,
                     seen = true,
@@ -219,6 +238,35 @@ class MailClient(
                 return true
             } finally {
                 folder.close(true)
+            }
+        } finally {
+            store.close()
+        }
+    }
+
+    /** Sposta i messaggi indicati in un'altra cartella. */
+    fun moveMessages(fromFolder: String, toFolder: String, uids: List<Long>): Boolean {
+        if (uids.isEmpty()) return true
+        if (fromFolder.equals(toFolder, true)) return true
+        val store = openStore()
+        try {
+            val source = store.getFolder(fromFolder)
+            if (!source.exists()) return false
+            val target = store.getFolder(toFolder)
+            if (!target.exists()) {
+                try { target.create(Folder.HOLDS_MESSAGES) } catch (_: Exception) { return false }
+            }
+            source.open(Folder.READ_WRITE)
+            try {
+                val uidFolder = source as javax.mail.UIDFolder
+                val msgs = uids.mapNotNull { uidFolder.getMessageByUID(it) }.toTypedArray()
+                if (msgs.isEmpty()) return false
+                source.copyMessages(msgs, target)
+                for (m in msgs) m.setFlag(Flags.Flag.DELETED, true)
+                source.expunge()
+                return true
+            } finally {
+                source.close(true)
             }
         } finally {
             store.close()
@@ -295,6 +343,12 @@ class MailClient(
     private fun formatRecipient(msg: Message): String {
         val to = try { msg.getRecipients(Message.RecipientType.TO) } catch (_: Exception) { null }
         return addressLabel(to?.firstOrNull()) ?: "(destinatario sconosciuto)"
+    }
+
+    private fun rawRecipient(msg: Message): String {
+        val to = try { msg.getRecipients(Message.RecipientType.TO) } catch (_: Exception) { null }
+        val a = to?.firstOrNull() ?: return ""
+        return if (a is InternetAddress) a.address ?: "" else a.toString()
     }
 
     private fun fromRawAddress(msg: Message): String {
@@ -390,6 +444,18 @@ class MailClient(
     companion object {
         private val TRASH_CANDIDATES = listOf(
             "Cestino", "Trash", "INBOX.Trash", "Deleted", "Posta eliminata", "Deleted Messages"
+        )
+
+        private val SENT_HINTS = listOf("sent", "inviat", "gesendet", "enviad")
+
+        /** Nomi comuni provati esplicitamente se il server non li elenca. */
+        private val KNOWN_FOLDERS = listOf(
+            "INBOX",
+            "Posta inviata", "Posta Inviata", "Sent", "Sent Messages", "Sent Items",
+            "INBOX.Sent", "INBOX.Posta inviata", "Inviata", "Inviate",
+            "Bozze", "Drafts", "INBOX.Drafts",
+            "Cestino", "Trash", "INBOX.Trash", "Posta eliminata",
+            "Spam", "Junk", "Posta indesiderata", "INBOX.Spam"
         )
     }
 }

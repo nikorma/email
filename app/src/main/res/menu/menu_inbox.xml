@@ -17,6 +17,10 @@
         android:title="Solo non lette"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_domains"
+        android:title="Riepilogo per dominio"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_refresh"
         android:title="Aggiorna"
         app:showAsAction="never" />
